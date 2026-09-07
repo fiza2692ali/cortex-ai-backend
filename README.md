@@ -250,7 +250,7 @@ Test the following:
 
 ---
 
-## Internship Progress
+# Internship Progress
 
 ### Week 1
 

@@ -1,278 +1,279 @@
 # Cortex AI Backend
 
-A backend project developed as part of the **ZYROO Backend Development Internship – Week 1**.
+Backend API developed as part of the **ZYROO Backend Development Internship**.
 
----
-
-## Week 1 Objectives
-
-The Week 1 project focuses on backend fundamentals and project setup.
-
-The following components have been implemented:
-
-- Node.js project initialization
-- Express.js server setup
-- Organized backend folder structure
-- MongoDB Atlas database connection
-- Environment variable configuration using dotenv
-- CORS support
-- Global error-handling middleware
-- Request logging middleware
-- Health check API endpoint
-- Postman API testing
-- Git version control
-- GitHub repository setup
-- `.gitignore` configuration
+The project currently includes the Week 1 backend setup and Week 2 **User Authentication** system using Node.js, Express, MongoDB, bcrypt, and JWT.
 
 ---
 
 ## Technologies Used
 
-| Technology | Purpose |
-|------------|---------|
-| Node.js | JavaScript runtime |
-| Express.js | Backend web framework |
-| MongoDB Atlas | Cloud database |
-| Mongoose | MongoDB object modeling and connection |
-| CORS | Allows frontend-backend communication |
-| dotenv | Loads environment variables |
-| Nodemon | Automatically restarts the server during development |
-| Git | Version control |
-| GitHub | Remote code repository |
-| Postman | API testing |
+| Technology    | Purpose                                              |
+| ------------- | ---------------------------------------------------- |
+| Node.js       | JavaScript runtime                                   |
+| Express.js    | Backend web framework                                |
+| MongoDB Atlas | Cloud database                                       |
+| Mongoose      | MongoDB object modeling and connection               |
+| bcrypt        | Password hashing                                     |
+| jsonwebtoken  | JWT generation and verification                      |
+| CORS          | Allows frontend-backend communication                |
+| dotenv        | Loads environment variables                          |
+| Nodemon       | Automatically restarts the server during development |
+| Git           | Version control                                      |
+| GitHub        | Remote code repository                               |
+| Postman       | API testing                                          |
+
+---
+
+## Features
+
+### Week 1 — Backend Setup
+
+* Express server setup
+* MongoDB Atlas connection
+* Health check API
+* Request logging
+* Centralized error handling
+* Environment variable configuration
+* CORS support
+
+### Week 2 — User Authentication
+
+* User registration
+* Email validation
+* Password validation
+* Secure password hashing with bcrypt
+* Duplicate email detection
+* User login
+* JWT token generation
+* JWT authentication middleware
+* Protected `/api/auth/me` route
+* Invalid and expired token handling
 
 ---
 
 ## Project Structure
 
-The backend follows an organized structure separating routes, controllers, configuration, middleware, models, and utilities.
-
-    cortex-ai-backend/
-    │
-    ├── config/
-    │   └── db.js
-    │
-    ├── controllers/
-    │   └── healthController.js
-    │
-    ├── middleware/
-    │   ├── errorHandler.js
-    │   └── logger.js
-    │
-    ├── models/
-    │
-    ├── routes/
-    │   └── healthRoutes.js
-    │
-    ├── utils/
-    │
-    ├── .env
-    ├── .gitignore
-    ├── app.js
-    ├── server.js
-    ├── package.json
-    ├── package-lock.json
-    └── README.md
-
----
-
-## Backend Components
-
-### Express Server
-
-The application uses Express.js to create and run the backend server.
-
-The server starts on port 5000 by default.
-
-### MongoDB Connection
-
-MongoDB Atlas is used as the database.
-
-Mongoose is used to establish the connection between the Node.js backend and MongoDB Atlas.
-
-The database connection is stored in the `config` folder.
-
-Sensitive database credentials are stored in environment variables instead of being hardcoded in the source code.
-
-### CORS
-
-CORS support has been added so that a frontend application can communicate with the backend.
-
-### Request Logger
-
-A request logger middleware records incoming HTTP requests.
-
-For example, a request may produce a log similar to:
-
-    GET /api/health 200 - 11ms
-
-The log contains:
-
-- HTTP method
-- Requested endpoint
-- HTTP response status
-- Request processing time
-
-### Global Error Handler
-
-A global error-handling middleware is included to provide consistent JSON error responses instead of uncontrolled errors.
+```text
+cortex-ai-backend/
+│
+├── config/
+│   └── db.js
+│
+├── controllers/
+│   ├── authController.js
+│   └── healthController.js
+│
+├── middleware/
+│   ├── authMiddleware.js
+│   ├── errorHandler.js
+│   └── logger.js
+│
+├── models/
+│   └── User.js
+│
+├── routes/
+│   ├── authRoutes.js
+│   └── healthRoutes.js
+│
+├── .env
+├── .gitignore
+├── app.js
+├── server.js
+├── package.json
+└── README.md
+```
 
 ---
 
-## Health Check API
+## API Endpoints
 
-The project includes the required health-check endpoint.
+| Method | Endpoint             | Description                      | Authentication |
+| ------ | -------------------- | -------------------------------- | -------------- |
+| GET    | `/api/health`        | Check server status              | No             |
+| POST   | `/api/auth/register` | Register a new user              | No             |
+| POST   | `/api/auth/login`    | Login and receive JWT            | No             |
+| GET    | `/api/auth/me`       | Get logged-in user's information | Yes            |
 
-### Endpoint
+---
 
-    GET /api/health
+## Authentication
 
-### Purpose
+### Register
 
-The endpoint confirms that the backend server is running correctly.
+**POST** `/api/auth/register`
 
-### Expected Response
+Request body:
 
-The API returns a JSON response similar to:
+```json
+{
+  "name": "Test User",
+  "email": "test@example.com",
+  "password": "password123"
+}
+```
 
-    {
-        "success": true,
-        "message": "Cortex AI Backend is running"
-    }
+The password is hashed using bcrypt before being stored in MongoDB.
 
-The endpoint has been tested successfully using Postman.
+---
+
+### Login
+
+**POST** `/api/auth/login`
+
+Request body:
+
+```json
+{
+  "email": "test@example.com",
+  "password": "password123"
+}
+```
+
+A successful login returns a JWT token.
+
+---
+
+### Protected Route
+
+**GET** `/api/auth/me`
+
+Send the JWT using the Authorization header:
+
+```text
+Authorization: Bearer YOUR_JWT_TOKEN
+```
+
+The middleware verifies the token and attaches the decoded user information to the request.
+
+---
+
+## Validation & Error Handling
+
+The authentication system handles:
+
+* Missing required fields
+* Invalid email format
+* Passwords shorter than 6 characters
+* Duplicate email registration
+* Incorrect login credentials
+* Missing JWT token
+* Invalid JWT token
+* Expired JWT token
+* Server errors
+
+Invalid authentication requests return **HTTP 401 Unauthorized**.
 
 ---
 
 ## Environment Variables
 
-Sensitive configuration values are stored in a `.env` file.
+Create a `.env` file in the project root:
 
-The `.env` file should contain values similar to the following:
+```env
+PORT=5000
+MONGODB_URI=your_mongodb_connection_string
+JWT_SECRET=your_super_secret_jwt_key
+```
 
-    PORT=5000
-    MONGODB_URI=your_mongodb_connection_string
-
-Replace `your_mongodb_connection_string` with your own MongoDB Atlas connection string.
-
-### Important
-
-The actual `.env` file should never be uploaded to GitHub because it contains sensitive information such as database credentials.
-
-The `.env` file is excluded through `.gitignore`.
+Do not commit the `.env` file to GitHub.
 
 ---
 
-## Installation
 
-### 1. Clone the Repository
+# Installation
 
-Clone the repository from GitHub using Git:
+## 1. Clone the Repository
 
-    git clone https://github.com/fiza2692ali/cortex-ai-backend
+Clone the repository from GitHub:
 
-### 2. Open the Project Folder
+```bash
+git clone https://github.com/fiza2692ali/cortex-ai-backend.git
+```
 
-Navigate into the project directory:
+## 2. Open the Project Folder
 
-    cd cortex-ai-backend
+```bash
+cd cortex-ai-backend
+```
 
-### 3. Install Dependencies
+## 3. Install Dependencies
 
-Install the required Node.js packages:
+```bash
+npm install
+```
 
-    npm install
-
-### 4. Create the Environment File
+## 4. Create the Environment File
 
 Create a file named:
 
-    .env
+```text
+.env
+```
 
-Add your environment variables to the file.
+Add the required environment variables:
 
-Example:
+```env
+PORT=5000
+MONGODB_URI=your_mongodb_connection_string
+JWT_SECRET=your_secure_jwt_secret
+```
 
-    PORT=5000
-    MONGODB_URI=your_mongodb_connection_string
-
-Do not use the example connection string as an actual database connection.
+Do not use example values as actual credentials.
 
 ---
 
-## Running the Backend
+# Running the Backend
 
-### Start the Server
+## Start the Server
 
 Run:
 
-    node server.js
+```bash
+node server.js
+```
 
 If the setup is correct, the terminal should display messages similar to:
 
-    MongoDB connected successfully
-    Server running on port 5000
-
-### Development Mode
-
-Nodemon can be used during development so that the server automatically restarts when files are changed.
-
-Run:
-
-    npx nodemon server.js
+```text
+MongoDB connected successfully
+Server running on port 5000
+```
 
 ---
 
-## Testing the API
+## Testing with Postman
 
-The API can be tested using Postman.
+The authentication APIs were tested using Postman.
 
-### Health Check Request
+Test the following:
 
-Method:
-
-    GET
-
-URL:
-
-    http://localhost:5000/api/health
-
-The expected response is:
-
-    {
-        "success": true,
-        "message": "Cortex AI Backend is running"
-    }
-
-A successful request should return an HTTP success status.
+1. Register a new user using `/api/auth/register`.
+2. Verify that the password is stored as a bcrypt hash in MongoDB.
+3. Login using `/api/auth/login` and copy the returned JWT.
+4. Use the JWT as a Bearer Token for `/api/auth/me`.
+5. Verify that requests without a token or with an invalid/expired token are rejected with `401 Unauthorized`.
 
 ---
 
 ## Security
 
-Sensitive information is not hardcoded into the source code.
-
-Environment variables are used for configuration values such as:
-
-- Server port
-- MongoDB connection string
-- Future API keys and other sensitive values
-
-The `.env` file is excluded from Git using `.gitignore`.
+* Passwords are never stored in plain text.
+* JWT authentication is used for protected routes.
+* Sensitive configuration is stored in environment variables.
+* `.env` is excluded from version control.
 
 ---
 
-## Internship
+## Internship Progress
 
-This project is part of the:
+### Week 1
 
-**ZYROO Internship Program**
+Backend and database foundation completed.
 
-**Track:** Cortex AI Backend Development
+### Week 2
 
-**Task:** Week 1 – Project Setup and Basic Server
-
-Week 1 focuses on establishing the backend foundation that future features will be built upon.
+User authentication and JWT-based authorization completed.
 
 ---
 
@@ -280,4 +281,5 @@ Week 1 focuses on establishing the backend foundation that future features will 
 
 **Fiza Ali**
 
-ZYROO Backend Softeware Engineering Internship
+BS Computer Science
+ZYROO Backend Development Internship

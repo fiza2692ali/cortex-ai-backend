@@ -166,21 +166,6 @@ Invalid authentication requests return **HTTP 401 Unauthorized**.
 
 ---
 
-## Environment Variables
-
-Create a `.env` file in the project root:
-
-```env
-PORT=5000
-MONGODB_URI=your_mongodb_connection_string
-JWT_SECRET=your_super_secret_jwt_key
-```
-
-Do not commit the `.env` file to GitHub.
-
----
-
-
 # Installation
 
 ## 1. Clone the Repository

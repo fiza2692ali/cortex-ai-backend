@@ -1,34 +1,49 @@
 const jwt = require("jsonwebtoken");
 
-const protect = (req, res, next) => {
+const authMiddleware = (req, res, next) => {
     try {
-        // Get token from Authorization header
         const authHeader = req.headers.authorization;
 
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        if (!authHeader) {
             return res.status(401).json({
                 success: false,
-                message: "Not authorized, token missing"
+                message: "Authorization header is missing."
             });
         }
 
-        // Extract token
+        if (!authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({
+                success: false,
+                message: "Authorization header must use Bearer token."
+            });
+        }
+
         const token = authHeader.split(" ")[1];
 
-        // Verify token
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (!token) {
+            return res.status(401).json({
+                success: false,
+                message: "Token is missing."
+            });
+        }
 
-        // Attach user information to request
+        const decoded = jwt.verify(
+            token,
+            process.env.JWT_SECRET
+        );
+
         req.user = decoded;
 
         next();
 
     } catch (error) {
+        console.error("Authentication error:", error.message);
+
         return res.status(401).json({
             success: false,
-            message: "Not authorized, invalid or expired token"
+            message: "Invalid or expired token."
         });
     }
 };
 
-module.exports = protect;
+module.exports = authMiddleware;

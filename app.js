@@ -3,6 +3,8 @@ const cors = require("cors");
 
 const healthRoutes = require("./routes/healthRoutes");
 const authRoutes = require("./routes/authRoutes");
+const documentRoutes = require("./routes/documentRoutes");
+const searchRoutes = require("./routes/searchRoutes");
 const logger = require("./middleware/logger");
 const errorHandler = require("./middleware/errorHandler");
 
@@ -16,6 +18,8 @@ app.use(logger);
 
 app.use("/api/health", healthRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/documents", documentRoutes);
+app.use("/api/search", searchRoutes);
 
 app.use(errorHandler);
 

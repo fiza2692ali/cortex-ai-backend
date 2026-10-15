@@ -106,16 +106,16 @@ async function semanticSearch(req, res, next) {
         // ---------------------------------
         // 5. Generate query embedding
         // ---------------------------------
-
+        
         const queryVector =
             await generateQueryEmbedding(
                 query.trim()
             );
-
+        
         // ---------------------------------
         // 6. Search Qdrant
         // ---------------------------------
-
+        
         const results =
             await searchSimilarChunks(
                 queryVector,
@@ -123,8 +123,7 @@ async function semanticSearch(req, res, next) {
                 documentId || null,
                 ownerId
             );
-
-
+        
         // ---------------------------------
         // 7. Format search results
         // ---------------------------------

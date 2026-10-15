@@ -136,64 +136,54 @@ async function deleteDocumentVectors(documentId) {
 async function searchSimilarChunks(
     vector,
     limit = 5,
-    documentId = null,
+    documentIds = null,
     ownerId = null
 ) {
     await ensureCollection();
 
-    const must = [];
-
-    if (ownerId) {
-        must.push({
-            key: "ownerId",
-            match: {
-                value: ownerId.toString()
-            }
-        });
+    if (!ownerId) {
+        throw new Error("Owner ID is required for vector search.");
     }
 
-    if (documentId) {
+    const must = [
+        {
+            key: "ownerId",
+            match: {
+                value: String(ownerId)
+            }
+        }
+    ];
+
+    if (documentIds) {
+        const ids = (
+            Array.isArray(documentIds)
+                ? documentIds
+                : [documentIds]
+        ).map(String);
+
+        if (ids.length === 0) {
+            return [];
+        }
+
         must.push({
             key: "documentId",
             match: {
-                value: documentId.toString()
+                any: ids
             }
         });
     }
 
-    const queryParams = {
-        query: vector,
-        limit: Number(limit),
-        with_payload: true
-    };
-
-    if (must.length > 0) {
-        queryParams.filter = {
-            must: must
-        };
-    }
-    
-    try {
-        const response = await client.query(
-            COLLECTION_NAME,
-            queryParams
-        );
-
-        return response.points || [];
-
-    } catch (error) {
-        console.error("Qdrant search error:", error.message);
-
-        if (error.data) {
-            console.error(
-                "Qdrant error data:",
-                JSON.stringify(error.data, null, 2)
-            );
+    const response = await client.query(
+        COLLECTION_NAME,
+        {
+            query: vector,
+            limit: Number(limit),
+            with_payload: true,
+            filter: { must }
         }
+    );
 
-        throw error;
-    }
-
+    return response.points || [];
 }
 
 module.exports = {

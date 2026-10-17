@@ -13,6 +13,10 @@ const {
     deleteSession
 } = require("../controllers/chatController");
 
+const quotaMiddleware = require(
+    "../middleware/quotaMiddleware"
+);
+
 router.use(authMiddleware);
 
 router.post("/sessions", createSession);
@@ -21,6 +25,7 @@ router.get("/sessions", getSessions);
 
 router.post(
     "/sessions/:id/messages",
+    quotaMiddleware("message"),
     sendMessage
 );
 

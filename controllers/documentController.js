@@ -22,7 +22,11 @@ const {
     deleteDocumentVectors
 } = require("../services/qdrantService");
 
+const {
+    releaseUsage
+} = require("../services/subscriptionService");
 
+// HELPER FUNCTIONS
 function getFileType(file) {
     const extension = path
         .extname(file.originalname)
@@ -43,7 +47,6 @@ function getFileType(file) {
     return null;
 }
 
-
 function getOwnerId(req) {
     return (
         req.user?.id ||
@@ -51,7 +54,6 @@ function getOwnerId(req) {
         req.user?._id
     );
 }
-
 
 function createPointId(documentId, chunkIndex) {
     const hash = crypto
@@ -64,12 +66,37 @@ function createPointId(documentId, chunkIndex) {
     return hash.substring(0, 32);
 }
 
+// Refund a reserved quota.
+async function refundReservation(reservation) {
+    if (reservation &&
+        typeof reservation.refund === "function") {
+        await reservation.refund();
+    }
+}
 
+// Used when the controller returns an error
+async function refundUploadQuotas(req) {
+    await refundReservation(req.storageReservation);
+    await refundReservation(req.quotaReservation);
+}
+
+// Remove the temporary uploaded file.
+async function removeTemporaryFile(req) {
+    if (req.file && req.file.path) {
+        await fs.unlink(req.file.path).catch(() => {});
+    }
+}
+
+// UPLOAD DOCUMENT
 async function uploadDocument(req, res, next) {
     let document = null;
+    let uploadCompleted = false;
 
     try {
+        // Validate uploaded file
         if (!req.file) {
+            await refundUploadQuotas(req);
+
             return res.status(400).json({
                 success: false,
                 message: "No file uploaded."
@@ -79,33 +106,40 @@ async function uploadDocument(req, res, next) {
         const fileType = getFileType(req.file);
 
         if (!fileType) {
-            await fs.unlink(req.file.path).catch(() => {});
+            await removeTemporaryFile(req);
+            await refundUploadQuotas(req);
 
             return res.status(400).json({
                 success: false,
-                message: "Only PDF, DOCX, and TXT files are allowed."
+                message:
+                    "Only PDF, DOCX, and TXT files are allowed."
             });
         }
 
         const ownerId = getOwnerId(req);
 
         if (!ownerId) {
-            await fs.unlink(req.file.path).catch(() => {});
+            await removeTemporaryFile(req);
+            await refundUploadQuotas(req);
 
             return res.status(401).json({
                 success: false,
-                message: "Authenticated user ID was not found."
+                message:
+                    "Authenticated user ID was not found."
             });
         }
 
+        // Create document record and save file size
         document = await Document.create({
             owner: ownerId,
             filename: req.file.originalname,
             fileType: fileType,
+            fileSize: req.file.size,
             status: "processing",
             uploadedAt: new Date()
         });
 
+        // Extract text from uploaded document
         const extraction = await extractText(
             req.file.path,
             fileType
@@ -117,10 +151,12 @@ async function uploadDocument(req, res, next) {
 
         if (!cleanedText) {
             throw new Error(
-                "No readable text could be extracted from the uploaded file."
+                "No readable text could be extracted " +
+                "from the uploaded file."
             );
         }
 
+        // Divide extracted text into chunks
         const chunks = splitTextIntoChunks(
             cleanedText,
             500,
@@ -129,7 +165,8 @@ async function uploadDocument(req, res, next) {
 
         if (chunks.length === 0) {
             throw new Error(
-                "The document could not be divided into chunks."
+                "The document could not be " +
+                "divided into chunks."
             );
         }
 
@@ -137,6 +174,7 @@ async function uploadDocument(req, res, next) {
 
         await document.save();
 
+        // Save chunks in MongoDB
         const chunkDocuments = chunks.map(chunk => ({
             document: document._id,
             chunkIndex: chunk.chunkIndex,
@@ -149,6 +187,7 @@ async function uploadDocument(req, res, next) {
         const savedChunks =
             await Chunk.insertMany(chunkDocuments);
 
+        // Generate embeddings
         let embeddings;
 
         try {
@@ -175,6 +214,7 @@ async function uploadDocument(req, res, next) {
             throw embeddingError;
         }
 
+        // Prepare Qdrant vector points
         const points = savedChunks.map(
             (chunk, index) => ({
                 id: createPointId(
@@ -195,8 +235,10 @@ async function uploadDocument(req, res, next) {
             })
         );
 
+        // Store embeddings in Qdrant
         await upsertChunks(points);
 
+        // Update chunk embedding status
         await Chunk.updateMany(
             {
                 document: document._id
@@ -211,20 +253,26 @@ async function uploadDocument(req, res, next) {
             }
         );
 
+        // Mark document as ready
         document.status = "ready";
 
         await document.save();
 
-        await fs.unlink(req.file.path).catch(() => {});
+        uploadCompleted = true;
+
+        // Remove temporary uploaded file
+        await removeTemporaryFile(req);
 
         return res.status(201).json({
             success: true,
-            message: "Document uploaded and processed successfully.",
+            message:
+                "Document uploaded and processed successfully.",
 
             document: {
                 id: document._id,
                 filename: document.filename,
                 fileType: document.fileType,
+                fileSize: document.fileSize,
                 status: document.status,
                 pageCount: document.pageCount,
                 chunkCount: savedChunks.length,
@@ -234,21 +282,20 @@ async function uploadDocument(req, res, next) {
 
     } catch (error) {
 
-        if (document) {
+        // Preserve failed document information
+        if (document && !uploadCompleted) {
             document.status = "failed";
 
             await document.save().catch(() => {});
         }
 
-        if (req.file && req.file.path) {
-            await fs.unlink(req.file.path).catch(() => {});
-        }
+        await removeTemporaryFile(req);
 
         next(error);
     }
 }
 
-
+// GET ALL DOCUMENTS
 async function getDocuments(req, res, next) {
     try {
         const ownerId = getOwnerId(req);
@@ -256,7 +303,8 @@ async function getDocuments(req, res, next) {
         if (!ownerId) {
             return res.status(401).json({
                 success: false,
-                message: "Authenticated user ID was not found."
+                message:
+                    "Authenticated user ID was not found."
             });
         }
 
@@ -265,7 +313,8 @@ async function getDocuments(req, res, next) {
         })
             .sort({ uploadedAt: -1 })
             .select(
-                "filename fileType status pageCount uploadedAt createdAt updatedAt"
+                "filename fileType fileSize status " +
+                "pageCount uploadedAt createdAt updatedAt"
             );
 
         return res.status(200).json({
@@ -279,7 +328,7 @@ async function getDocuments(req, res, next) {
     }
 }
 
-
+// GET DOCUMENT BY ID
 async function getDocumentById(req, res, next) {
     try {
         const ownerId = getOwnerId(req);
@@ -287,7 +336,8 @@ async function getDocumentById(req, res, next) {
         if (!ownerId) {
             return res.status(401).json({
                 success: false,
-                message: "Authenticated user ID was not found."
+                message:
+                    "Authenticated user ID was not found."
             });
         }
 
@@ -321,7 +371,7 @@ async function getDocumentById(req, res, next) {
     }
 }
 
-
+// DELETE DOCUMENT
 async function deleteDocument(req, res, next) {
     try {
         const ownerId = getOwnerId(req);
@@ -329,7 +379,8 @@ async function deleteDocument(req, res, next) {
         if (!ownerId) {
             return res.status(401).json({
                 success: false,
-                message: "Authenticated user ID was not found."
+                message:
+                    "Authenticated user ID was not found."
             });
         }
 
@@ -345,28 +396,45 @@ async function deleteDocument(req, res, next) {
             });
         }
 
+        // Delete vectors from Qdrant
         await deleteDocumentVectors(
             document._id
         );
 
+        // Delete associated chunks
         await Chunk.deleteMany({
             document: document._id
         });
 
-        await Document.deleteOne({
-            _id: document._id
+        // Delete document record
+        const deletion = await Document.deleteOne({
+            _id: document._id,
+            owner: ownerId
         });
+
+        // Release storage quota after successful deletion
+        if (
+            deletion.deletedCount === 1 &&
+            document.status === "ready" &&
+            document.fileSize > 0
+        ) {
+            await releaseUsage(
+                ownerId,
+                "storage",
+                document.fileSize
+            );
+        }
 
         return res.status(200).json({
             success: true,
-            message: "Document and its chunks deleted successfully."
+            message:
+                "Document and its chunks deleted successfully."
         });
 
     } catch (error) {
         next(error);
     }
 }
-
 
 module.exports = {
     uploadDocument,

@@ -18,6 +18,12 @@ function isValidId(id) {
     return mongoose.isValidObjectId(id);
 }
 
+async function refundMessageQuota(req) {
+    if (req.quotaReservation) {
+        await req.quotaReservation.refund();
+    }
+}
+
 async function createSession(req, res, next) {
     try {
         const ownerId = getOwnerId(req);
@@ -101,24 +107,31 @@ async function getSessions(req, res, next) {
     }
 }
 
+
 async function sendMessage(req, res, next) {
     try {
         const ownerId = getOwnerId(req);
         const sessionId = req.params.id;
         const { content } = req.body || {};
 
+        // Validate session ID
         if (!isValidId(sessionId)) {
+            await refundMessageQuota(req);
+
             return res.status(400).json({
                 success: false,
                 message: "Invalid session ID."
             });
         }
 
+        // Validate message content
         if (
             typeof content !== "string" ||
             !content.trim() ||
             content.length > 4000
         ) {
+            await refundMessageQuota(req);
+
             return res.status(400).json({
                 success: false,
                 message:
@@ -126,18 +139,22 @@ async function sendMessage(req, res, next) {
             });
         }
 
+        // Find a session belonging to this user
         const session = await ChatSession.findOne({
             _id: sessionId,
             owner: ownerId
         });
 
         if (!session) {
+            await refundMessageQuota(req);
+
             return res.status(404).json({
                 success: false,
                 message: "Chat session not found."
             });
         }
 
+        // Retrieve the last 10 messages
         const history = await Message.find({
             session: session._id
         })
@@ -147,6 +164,7 @@ async function sendMessage(req, res, next) {
 
         history.reverse();
 
+        // Generate answer using the existing RAG service
         const result = await generateRagAnswer({
             question: content.trim(),
             ownerId,
@@ -154,13 +172,14 @@ async function sendMessage(req, res, next) {
             history
         });
 
-        // Store only after the RAG operation succeeds.
+        // Save user message
         const userMessage = await Message.create({
             session: session._id,
             role: "user",
             content: content.trim()
         });
 
+        // Save assistant response
         const assistantMessage = await Message.create({
             session: session._id,
             role: "assistant",
@@ -176,6 +195,15 @@ async function sendMessage(req, res, next) {
         });
 
     } catch (error) {
+        try {
+            await refundMessageQuota(req);
+        } catch (refundError) {
+            console.error(
+                "Message quota refund failed:",
+                refundError
+            );
+        }
+
         next(error);
     }
 }

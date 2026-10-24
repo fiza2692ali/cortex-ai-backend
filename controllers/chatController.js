@@ -9,24 +9,38 @@ const {
 } = require("../services/ragService");
 
 function getOwnerId(req) {
-    return req.user?.userId ||
-           req.user?.id ||
-           req.user?._id;
+    return (
+        req.user?.userId ||
+        req.user?.id ||
+        req.user?._id
+    );
 }
 
-function isValidId(id) {
-    return mongoose.isValidObjectId(id);
+function getWorkspaceId(req) {
+    return req.workspace?._id || null;
+}
+
+function sessionFilter(req, id) {
+    const workspaceId = getWorkspaceId(req);
+
+    return workspaceId
+        ? { _id: id, workspace: workspaceId }
+        : {
+            _id: id,
+            owner: getOwnerId(req),
+            workspace: null
+        };
 }
 
 async function refundMessageQuota(req) {
-    if (req.quotaReservation) {
-        await req.quotaReservation.refund();
-    }
+    await req.quotaReservation?.refund();
 }
 
 async function createSession(req, res, next) {
     try {
         const ownerId = getOwnerId(req);
+        const workspaceId = getWorkspaceId(req);
+
         const {
             title = "New Chat",
             documentIds = []
@@ -45,7 +59,10 @@ async function createSession(req, res, next) {
 
         if (
             !Array.isArray(documentIds) ||
-            documentIds.some(id => !isValidId(id))
+            documentIds.length > 100 ||
+            documentIds.some(
+                id => !mongoose.isValidObjectId(id)
+            )
         ) {
             return res.status(400).json({
                 success: false,
@@ -53,14 +70,18 @@ async function createSession(req, res, next) {
             });
         }
 
-        const uniqueIds = [...new Set(
-            documentIds.map(String)
-        )];
+        const uniqueIds = [
+            ...new Set(documentIds.map(String))
+        ];
 
         if (uniqueIds.length > 0) {
+            const accessFilter = workspaceId
+                ? { workspace: workspaceId }
+                : { owner: ownerId, workspace: null };
+
             const count = await Document.countDocuments({
                 _id: { $in: uniqueIds },
-                owner: ownerId,
+                ...accessFilter,
                 status: "ready"
             });
 
@@ -68,13 +89,14 @@ async function createSession(req, res, next) {
                 return res.status(400).json({
                     success: false,
                     message:
-                        "All selected documents must belong to you and be ready."
+                        "All selected documents must be accessible and ready."
                 });
             }
         }
 
         const session = await ChatSession.create({
             owner: ownerId,
+            workspace: workspaceId,
             title: title.trim(),
             documentIds: uniqueIds
         });
@@ -92,9 +114,17 @@ async function createSession(req, res, next) {
 
 async function getSessions(req, res, next) {
     try {
-        const sessions = await ChatSession.find({
-            owner: getOwnerId(req)
-        }).sort({ createdAt: -1 });
+        const workspaceId = getWorkspaceId(req);
+
+        const filter = workspaceId
+            ? { workspace: workspaceId }
+            : {
+                owner: getOwnerId(req),
+                workspace: null
+            };
+
+        const sessions = await ChatSession.find(filter)
+            .sort({ createdAt: -1 });
 
         return res.status(200).json({
             success: true,
@@ -107,15 +137,14 @@ async function getSessions(req, res, next) {
     }
 }
 
-
 async function sendMessage(req, res, next) {
     try {
         const ownerId = getOwnerId(req);
-        const sessionId = req.params.id;
+        const workspaceId = getWorkspaceId(req);
+        const sessionId = req.params.sessionId || req.params.id;
         const { content } = req.body || {};
 
-        // Validate session ID
-        if (!isValidId(sessionId)) {
+        if (!mongoose.isValidObjectId(sessionId)) {
             await refundMessageQuota(req);
 
             return res.status(400).json({
@@ -124,7 +153,6 @@ async function sendMessage(req, res, next) {
             });
         }
 
-        // Validate message content
         if (
             typeof content !== "string" ||
             !content.trim() ||
@@ -139,11 +167,9 @@ async function sendMessage(req, res, next) {
             });
         }
 
-        // Find a session belonging to this user
-        const session = await ChatSession.findOne({
-            _id: sessionId,
-            owner: ownerId
-        });
+        const session = await ChatSession.findOne(
+            sessionFilter(req, sessionId)
+        );
 
         if (!session) {
             await refundMessageQuota(req);
@@ -154,7 +180,31 @@ async function sendMessage(req, res, next) {
             });
         }
 
-        // Retrieve the last 10 messages
+        // Revalidate document access at message time.
+        // A document might have been deleted after
+        // the session was created.
+        if (session.documentIds.length > 0) {
+            const accessFilter = workspaceId
+                ? { workspace: workspaceId }
+                : { owner: ownerId, workspace: null };
+
+            const count = await Document.countDocuments({
+                _id: { $in: session.documentIds },
+                ...accessFilter,
+                status: "ready"
+            });
+
+            if (count !== session.documentIds.length) {
+                await refundMessageQuota(req);
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        "Some session documents are no longer available."
+                });
+            }
+        }
+
         const history = await Message.find({
             session: session._id
         })
@@ -164,22 +214,20 @@ async function sendMessage(req, res, next) {
 
         history.reverse();
 
-        // Generate answer using the existing RAG service
         const result = await generateRagAnswer({
             question: content.trim(),
             ownerId,
+            workspaceId,
             documentIds: session.documentIds,
             history
         });
 
-        // Save user message
         const userMessage = await Message.create({
             session: session._id,
             role: "user",
             content: content.trim()
         });
 
-        // Save assistant response
         const assistantMessage = await Message.create({
             session: session._id,
             role: "assistant",
@@ -210,17 +258,18 @@ async function sendMessage(req, res, next) {
 
 async function getMessages(req, res, next) {
     try {
-        if (!isValidId(req.params.id)) {
+        const sessionId = req.params.sessionId || req.params.id;
+
+        if (!mongoose.isValidObjectId(sessionId)) {
             return res.status(400).json({
                 success: false,
                 message: "Invalid session ID."
             });
         }
 
-        const session = await ChatSession.findOne({
-            _id: req.params.id,
-            owner: getOwnerId(req)
-        });
+        const session = await ChatSession.findOne(
+            sessionFilter(req, sessionId)
+        );
 
         if (!session) {
             return res.status(404).json({
@@ -247,17 +296,18 @@ async function getMessages(req, res, next) {
 
 async function deleteSession(req, res, next) {
     try {
-        if (!isValidId(req.params.id)) {
+        const sessionId = req.params.sessionId || req.params.id;
+
+        if (!mongoose.isValidObjectId(sessionId)) {
             return res.status(400).json({
                 success: false,
                 message: "Invalid session ID."
             });
         }
 
-        const session = await ChatSession.findOne({
-            _id: req.params.id,
-            owner: getOwnerId(req)
-        });
+        const session = await ChatSession.findOne(
+            sessionFilter(req, sessionId)
+        );
 
         if (!session) {
             return res.status(404).json({
@@ -266,12 +316,30 @@ async function deleteSession(req, res, next) {
             });
         }
 
+        // Only the creator can delete a shared session.
+        if (
+            getWorkspaceId(req) &&
+            String(session.owner) !== String(getOwnerId(req)) &&
+            !req.workspace.isOwner(getOwnerId(req))
+        ) {
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Only the session creator or workspace owner can delete it."
+            });
+        }
+
         await Message.deleteMany({
             session: session._id
         });
 
         await ChatSession.deleteOne({
-            _id: session._id
+            _id: session._id,
+            ...(
+                getWorkspaceId(req)
+                    ? { workspace: getWorkspaceId(req) }
+                    : { owner: getOwnerId(req), workspace: null }
+            )
         });
 
         return res.status(200).json({

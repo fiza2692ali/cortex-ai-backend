@@ -1,6 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 
 const Document = require("../models/Document");
 const Chunk = require("../models/Chunk");
@@ -26,74 +27,58 @@ const {
     releaseUsage
 } = require("../services/subscriptionService");
 
-// HELPER FUNCTIONS
+function getOwnerId(req) {
+    return (
+        req.user?.userId ||
+        req.user?.id ||
+        req.user?._id
+    );
+}
+
 function getFileType(file) {
     const extension = path
         .extname(file.originalname)
         .toLowerCase();
 
-    if (extension === ".pdf") {
-        return "pdf";
-    }
-
-    if (extension === ".docx") {
-        return "docx";
-    }
-
-    if (extension === ".txt") {
-        return "txt";
-    }
+    if (extension === ".pdf") return "pdf";
+    if (extension === ".docx") return "docx";
+    if (extension === ".txt") return "txt";
 
     return null;
 }
 
-function getOwnerId(req) {
-    return (
-        req.user?.id ||
-        req.user?.userId ||
-        req.user?._id
-    );
-}
-
 function createPointId(documentId, chunkIndex) {
-    const hash = crypto
+    return crypto
         .createHash("sha256")
-        .update(
-            `${documentId.toString()}-${chunkIndex}`
-        )
-        .digest("hex");
-
-    return hash.substring(0, 32);
+        .update(`${documentId}-${chunkIndex}`)
+        .digest("hex")
+        .substring(0, 32);
 }
 
-// Refund a reserved quota.
-async function refundReservation(reservation) {
-    if (reservation &&
-        typeof reservation.refund === "function") {
-        await reservation.refund();
-    }
-}
-
-// Used when the controller returns an error
-async function refundUploadQuotas(req) {
-    await refundReservation(req.storageReservation);
-    await refundReservation(req.quotaReservation);
-}
-
-// Remove the temporary uploaded file.
 async function removeTemporaryFile(req) {
-    if (req.file && req.file.path) {
+    if (req.file?.path) {
         await fs.unlink(req.file.path).catch(() => {});
     }
+}
+
+async function refundUploadQuotas(req) {
+    await req.storageReservation?.refund();
+    await req.quotaReservation?.refund();
+}
+
+function personalDocumentFilter(req) {
+    return {
+        owner: getOwnerId(req),
+        workspace: null
+    };
 }
 
 // UPLOAD DOCUMENT
 async function uploadDocument(req, res, next) {
     let document = null;
-    let uploadCompleted = false;
+    let completed = false;
 
     try {
-        // Validate uploaded file
         if (!req.file) {
             await refundUploadQuotas(req);
 
@@ -111,8 +96,7 @@ async function uploadDocument(req, res, next) {
 
             return res.status(400).json({
                 success: false,
-                message:
-                    "Only PDF, DOCX, and TXT files are allowed."
+                message: "Only PDF, DOCX and TXT files are allowed."
             });
         }
 
@@ -124,83 +108,74 @@ async function uploadDocument(req, res, next) {
 
             return res.status(401).json({
                 success: false,
-                message:
-                    "Authenticated user ID was not found."
+                message: "Authentication required."
             });
         }
 
-        // Create document record and save file size
+        // Only the workspace route can set req.workspace.
+        const workspaceId = req.workspace
+            ? req.workspace._id
+            : null;
+
         document = await Document.create({
             owner: ownerId,
+            workspace: workspaceId,
             filename: req.file.originalname,
-            fileType: fileType,
+            fileType,
             fileSize: req.file.size,
             status: "processing",
             uploadedAt: new Date()
         });
 
-        // Extract text from uploaded document
         const extraction = await extractText(
             req.file.path,
             fileType
         );
 
-        const cleanedText = extraction.text
-            ? extraction.text.trim()
-            : "";
+        const cleanedText =
+            extraction.text?.trim() || "";
 
         if (!cleanedText) {
             throw new Error(
-                "No readable text could be extracted " +
-                "from the uploaded file."
+                "No readable text could be extracted."
             );
         }
 
-        // Divide extracted text into chunks
         const chunks = splitTextIntoChunks(
             cleanedText,
             500,
             50
         );
 
-        if (chunks.length === 0) {
+        if (!chunks.length) {
             throw new Error(
-                "The document could not be " +
-                "divided into chunks."
+                "Document could not be divided into chunks."
             );
         }
 
         document.pageCount = extraction.pageCount || 0;
-
         await document.save();
 
-        // Save chunks in MongoDB
-        const chunkDocuments = chunks.map(chunk => ({
-            document: document._id,
-            chunkIndex: chunk.chunkIndex,
-            text: chunk.text,
-            tokenCount: chunk.tokenCount,
-            embeddingStatus: "pending",
-            embeddingAttempts: 0
-        }));
+        const savedChunks = await Chunk.insertMany(
+            chunks.map(chunk => ({
+                document: document._id,
+                chunkIndex: chunk.chunkIndex,
+                text: chunk.text,
+                tokenCount: chunk.tokenCount,
+                embeddingStatus: "pending",
+                embeddingAttempts: 0
+            }))
+        );
 
-        const savedChunks =
-            await Chunk.insertMany(chunkDocuments);
-
-        // Generate embeddings
         let embeddings;
 
         try {
             embeddings = await generateEmbeddings(
                 savedChunks.map(chunk => chunk.text)
             );
-
-        } catch (embeddingError) {
-
+        } catch (error) {
             await Chunk.updateMany(
-                {
-                    document: document._id
-                },
+                { document: document._id },
                 {
                     $set: {
                         embeddingStatus: "failed"
@@ -211,10 +186,18 @@ async function uploadDocument(req, res, next) {
                 }
             );
 
-            throw embeddingError;
+            throw error;
         }
 
-        // Prepare Qdrant vector points
+        if (
+            !Array.isArray(embeddings) ||
+            embeddings.length !== savedChunks.length
+        ) {
+            throw new Error(
+                "Embedding count does not match chunk count."
+            );
+        }
+
         const points = savedChunks.map(
             (chunk, index) => ({
                 id: createPointId(
@@ -225,9 +208,16 @@ async function uploadDocument(req, res, next) {
                 vector: embeddings[index],
 
                 payload: {
-                    chunkId: chunk._id.toString(),
-                    documentId: document._id.toString(),
-                    ownerId: ownerId.toString(),
+                    chunkId: String(chunk._id),
+                    documentId: String(document._id),
+                    ownerId: String(ownerId),
+
+                    // Null for personal documents.
+                    // String ID for workspace documents.
+                    workspaceId: workspaceId
+                        ? String(workspaceId)
+                        : null,
+
                     filename: document.filename,
                     chunkIndex: chunk.chunkIndex,
                     text: chunk.text
@@ -235,14 +225,10 @@ async function uploadDocument(req, res, next) {
             })
         );
 
-        // Store embeddings in Qdrant
         await upsertChunks(points);
 
-        // Update chunk embedding status
         await Chunk.updateMany(
-            {
-                document: document._id
-            },
+            { document: document._id },
             {
                 $set: {
                     embeddingStatus: "embedded"
@@ -253,23 +239,21 @@ async function uploadDocument(req, res, next) {
             }
         );
 
-        // Mark document as ready
         document.status = "ready";
-
         await document.save();
 
-        uploadCompleted = true;
+        completed = true;
 
-        // Remove temporary uploaded file
         await removeTemporaryFile(req);
 
         return res.status(201).json({
             success: true,
             message:
                 "Document uploaded and processed successfully.",
-
             document: {
                 id: document._id,
+                owner: document.owner,
+                workspace: document.workspace,
                 filename: document.filename,
                 fileType: document.fileType,
                 fileSize: document.fileSize,
@@ -281,36 +265,53 @@ async function uploadDocument(req, res, next) {
         });
 
     } catch (error) {
+        if (!completed) {
+            if (document) {
+                // Best-effort cleanup of partial vector writes.
+                try {
+                    await deleteDocumentVectors(document._id);
+                } catch (cleanupError) {
+                    console.error(
+                        "Vector cleanup failed:",
+                        cleanupError
+                    );
+                }
 
-        // Preserve failed document information
-        if (document && !uploadCompleted) {
-            document.status = "failed";
+                await Chunk.deleteMany({
+                    document: document._id
+                }).catch(cleanupError => {
+                    console.error(
+                        "Chunk cleanup failed:",
+                        cleanupError
+                    );
+                });
 
-            await document.save().catch(() => {});
+                document.status = "failed";
+
+                await document.save().catch(() => {});
+            }
+
+            try {
+                await refundUploadQuotas(req);
+            } catch (refundError) {
+                console.error(
+                    "Quota refund failed:",
+                    refundError
+                );
+            }
         }
 
         await removeTemporaryFile(req);
-
         next(error);
     }
 }
 
-// GET ALL DOCUMENTS
+// LIST PERSONAL DOCUMENTS
 async function getDocuments(req, res, next) {
     try {
-        const ownerId = getOwnerId(req);
-
-        if (!ownerId) {
-            return res.status(401).json({
-                success: false,
-                message:
-                    "Authenticated user ID was not found."
-            });
-        }
-
-        const documents = await Document.find({
-            owner: ownerId
-        })
+        const documents = await Document.find(
+            personalDocumentFilter(req)
+        )
             .sort({ uploadedAt: -1 })
             .select(
                 "filename fileType fileSize status " +
@@ -328,22 +329,19 @@ async function getDocuments(req, res, next) {
     }
 }
 
-// GET DOCUMENT BY ID
+// GET PERSONAL DOCUMENT
 async function getDocumentById(req, res, next) {
     try {
-        const ownerId = getOwnerId(req);
-
-        if (!ownerId) {
-            return res.status(401).json({
+        if (!mongoose.isValidObjectId(req.params.id)) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Authenticated user ID was not found."
+                message: "Invalid document ID."
             });
         }
 
         const document = await Document.findOne({
             _id: req.params.id,
-            owner: ownerId
+            ...personalDocumentFilter(req)
         });
 
         if (!document) {
@@ -359,7 +357,6 @@ async function getDocumentById(req, res, next) {
 
         return res.status(200).json({
             success: true,
-
             document: {
                 ...document.toObject(),
                 chunkCount
@@ -371,23 +368,29 @@ async function getDocumentById(req, res, next) {
     }
 }
 
-// DELETE DOCUMENT
+// DELETE PERSONAL OR WORKSPACE DOCUMENT
 async function deleteDocument(req, res, next) {
     try {
-        const ownerId = getOwnerId(req);
-
-        if (!ownerId) {
-            return res.status(401).json({
+        if (!mongoose.isValidObjectId(req.params.id)) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Authenticated user ID was not found."
+                message: "Invalid document ID."
             });
         }
 
-        const document = await Document.findOne({
-            _id: req.params.id,
-            owner: ownerId
-        });
+        const documentFilter = req.workspace
+            ? {
+                _id: req.params.id,
+                workspace: req.workspace._id
+            }
+            : {
+                _id: req.params.id,
+                ...personalDocumentFilter(req)
+            };
+
+        const document = await Document.findOne(
+            documentFilter
+        );
 
         if (!document) {
             return res.status(404).json({
@@ -396,30 +399,40 @@ async function deleteDocument(req, res, next) {
             });
         }
 
-        // Delete vectors from Qdrant
-        await deleteDocumentVectors(
-            document._id
-        );
+        await deleteDocumentVectors(document._id);
 
-        // Delete associated chunks
         await Chunk.deleteMany({
             document: document._id
         });
 
-        // Delete document record
         const deletion = await Document.deleteOne({
             _id: document._id,
-            owner: ownerId
+            ...(
+                req.workspace
+                    ? { workspace: req.workspace._id }
+                    : personalDocumentFilter(req)
+            )
         });
 
-        // Release storage quota after successful deletion
+        if (deletion.deletedCount !== 1) {
+            return res.status(409).json({
+                success: false,
+                message: "Document deletion was not completed."
+            });
+        }
+
+        // Storage is billed to the workspace owner
+        // for shared documents.
+        const billingOwnerId = req.workspace
+            ? req.workspace.billingOwner
+            : getOwnerId(req);
+
         if (
-            deletion.deletedCount === 1 &&
             document.status === "ready" &&
             document.fileSize > 0
         ) {
             await releaseUsage(
-                ownerId,
+                billingOwnerId,
                 "storage",
                 document.fileSize
             );

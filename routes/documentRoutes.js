@@ -34,6 +34,92 @@ async function refundUploadReservations(req) {
     }
 }
 
+/**
+ * @swagger
+ * /api/documents:
+ *   post:
+ *     summary: Upload a document
+ *     description: Upload a document for processing and semantic search.
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - file
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *                 description: Document file to upload
+ *     responses:
+ *       200:
+ *         description: Document uploaded successfully
+ *       201:
+ *         description: Document created successfully
+ *       400:
+ *         description: Invalid file or request
+ *       401:
+ *         description: Authentication required
+ *       429:
+ *         description: Upload quota exceeded
+ *
+ *   get:
+ *     summary: Get all documents
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Documents retrieved successfully
+ *       401:
+ *         description: Authentication required
+ *
+ * /api/documents/{id}:
+ *   get:
+ *     summary: Get a document by ID
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Document ID
+ *     responses:
+ *       200:
+ *         description: Document retrieved successfully
+ *       401:
+ *         description: Authentication required
+ *       404:
+ *         description: Document not found
+ *
+ *   delete:
+ *     summary: Delete a document
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Document ID
+ *     responses:
+ *       200:
+ *         description: Document deleted successfully
+ *       401:
+ *         description: Authentication required
+ *       404:
+ *         description: Document not found
+ */
 
 // 1. Upload a document
 router.post(

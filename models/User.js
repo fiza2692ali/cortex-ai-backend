@@ -1,3 +1,4 @@
+
 const mongoose = require("mongoose");
 
 const userSchema = new mongoose.Schema(
@@ -18,7 +19,26 @@ const userSchema = new mongoose.Schema(
 
         password: {
             type: String,
-            required: true
+            required: true,
+            select: false
+        },
+
+        // Platform-level role
+        role: {
+            type: String,
+            enum: ["user", "admin"],
+            default: "user"
+        },
+
+        // Used by admin suspension endpoint
+        isSuspended: {
+            type: Boolean,
+            default: false
+        },
+
+        suspendedAt: {
+            type: Date,
+            default: null
         }
     },
     {

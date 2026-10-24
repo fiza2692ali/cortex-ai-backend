@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Document = require("../models/Document");
 
 const {
@@ -8,54 +9,28 @@ const {
     searchSimilarChunks
 } = require("../services/qdrantService");
 
-
 async function semanticSearch(req, res, next) {
     try {
-
         const {
             query,
             documentId,
             topK = 5
-        } = req.body;
+        } = req.body || {};
 
-
-        // ---------------------------------
-        // 1. Validate search query
-        // ---------------------------------
-
+        // Validate search query
         if (
-            !query ||
             typeof query !== "string" ||
-            !query.trim()
+            !query.trim() ||
+            query.length > 4000
         ) {
             return res.status(400).json({
                 success: false,
-                message: "Search query is required."
+                message:
+                    "Search query must contain 1 to 4000 characters."
             });
         }
 
-
-        // ---------------------------------
-        // 2. Get authenticated user's ID
-        // ---------------------------------
-
-        const ownerId =
-            req.user?.userId ||
-            req.user?.id ||
-            req.user?._id;
-
-
-        if (!ownerId) {
-            return res.status(401).json({
-                success: false,
-                message: "Authenticated user ID was not found."
-            });
-        }
-
-        // ---------------------------------
-        // 3. Validate topK
-        // ---------------------------------
-
+        // Validate topK
         const limit = Number(topK);
 
         if (
@@ -65,109 +40,141 @@ async function semanticSearch(req, res, next) {
         ) {
             return res.status(400).json({
                 success: false,
-                message: "topK must be an integer between 1 and 20."
+                message:
+                    "topK must be an integer between 1 and 20."
             });
         }
 
+        const ownerId =
+            req.user?.userId ||
+            req.user?.id ||
+            req.user?._id;
 
-        // ---------------------------------
-        // 4. If documentId is supplied,
-        // verify that it belongs to user
-        // ---------------------------------
+        if (!ownerId) {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication required."
+            });
+        }
 
+        // Workspace is set only by the protected
+        // workspace membership middleware.
+        const workspaceId = req.workspace
+            ? req.workspace._id
+            : null;
+
+        if (
+            documentId !== undefined &&
+            documentId !== null &&
+            !mongoose.isValidObjectId(documentId)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid document ID."
+            });
+        }
+
+        // Verify access to a selected document.
         if (documentId) {
-
-            const document =
-                await Document.findOne({
+            const filter = workspaceId
+                ? {
                     _id: documentId,
-                    owner: ownerId
-                });
+                    workspace: workspaceId
+                }
+                : {
+                    _id: documentId,
+                    owner: ownerId,
+                    workspace: null
+                };
 
+            const document = await Document.findOne(filter);
 
             if (!document) {
                 return res.status(404).json({
                     success: false,
-                    message:
-                        "Document not found or does not belong to this user."
+                    message: "Document not found."
                 });
             }
-
 
             if (document.status !== "ready") {
                 return res.status(400).json({
                     success: false,
                     message:
-                        "The selected document is not ready for semantic search."
+                        "Selected document is not ready for search."
                 });
             }
         }
 
+        // Generate query embedding
+        const queryVector = await generateQueryEmbedding(
+            query.trim()
+        );
 
-        // ---------------------------------
-        // 5. Generate query embedding
-        // ---------------------------------
-        
-        const queryVector =
-            await generateQueryEmbedding(
-                query.trim()
-            );
-        
-        // ---------------------------------
-        // 6. Search Qdrant
-        // ---------------------------------
-        
-        const results =
-            await searchSimilarChunks(
-                queryVector,
-                limit,
-                documentId || null,
-                ownerId
-            );
-        
-        // ---------------------------------
-        // 7. Format search results
-        // ---------------------------------
+        // Qdrant applies owner or workspace filtering.
+        const results = await searchSimilarChunks(
+            queryVector,
+            limit,
+            documentId || null,
+            ownerId,
+            workspaceId
+        );
 
-        const formattedResults =
-            results.map(result => ({
+        // Verify retrieved documents against MongoDB.
+        // This also excludes failed or deleted documents.
+        const candidateIds = [
+            ...new Set(
+                results
+                    .map(result => result.payload?.documentId)
+                    .filter(id => mongoose.isValidObjectId(id))
+                    .map(String)
+            )
+        ];
+
+        const accessFilter = workspaceId
+            ? { workspace: workspaceId }
+            : { owner: ownerId, workspace: null };
+
+        const allowedDocuments = await Document.find({
+            _id: { $in: candidateIds },
+            ...accessFilter,
+            status: "ready"
+        }).select("_id");
+
+        const allowedIds = new Set(
+            allowedDocuments.map(doc => String(doc._id))
+        );
+
+        const formattedResults = results
+            .filter(result =>
+                allowedIds.has(
+                    String(result.payload?.documentId)
+                )
+            )
+            .map(result => ({
                 score: result.score,
-
-                documentId:
-                    result.payload?.documentId,
-
-                filename:
-                    result.payload?.filename,
-
-                chunkId:
-                    result.payload?.chunkId,
-
-                chunkIndex:
-                    result.payload?.chunkIndex,
-
-                text:
-                    result.payload?.text
+                documentId: result.payload?.documentId,
+                filename: result.payload?.filename,
+                chunkId: result.payload?.chunkId,
+                chunkIndex: result.payload?.chunkIndex,
+                text: result.payload?.text
             }));
-
-
-        // ---------------------------------
-        // 8. Return response
-        // ---------------------------------
 
         return res.status(200).json({
             success: true,
             query: query.trim(),
+            workspaceId: workspaceId
+                ? String(workspaceId)
+                : null,
             documentId: documentId || null,
             topK: limit,
             count: formattedResults.length,
             results: formattedResults
         });
 
-
     } catch (error) {
         next(error);
     }
 }
-
 
 module.exports = {
     semanticSearch

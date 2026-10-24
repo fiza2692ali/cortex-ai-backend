@@ -7,90 +7,73 @@ const VECTOR_SIZE = 1536;
 
 const client = new QdrantClient({
     url: process.env.QDRANT_URL,
-    apiKey: process.env.QDRANT_API_KEY
+    apiKey: process.env.QDRANT_API_KEY,
+    checkCompatibility: false
 });
 
-async function ensureCollection() {
-    try {
-        const collections =
-            await client.getCollections();
+let initializationPromise = null;
 
-        const exists =
-            collections.collections.some(
-                collection =>
-                    collection.name === COLLECTION_NAME
-            );
+async function initializeCollection() {
+    const collections = await client.getCollections();
 
-        if (!exists) {
+    const exists = collections.collections.some(
+        collection => collection.name === COLLECTION_NAME
+    );
 
-            console.log(
-                `Creating Qdrant collection: ${COLLECTION_NAME}`
-            );
+    if (!exists) {
+        await client.createCollection(
+            COLLECTION_NAME,
+            {
+                vectors: {
+                    size: VECTOR_SIZE,
+                    distance: "Cosine"
+                }
+            }
+        );
+    }
 
-            await client.createCollection(
+    // Only create indexes that do not already exist.
+    const collectionInfo = await client.getCollection(
+        COLLECTION_NAME
+    );
+
+    const existingIndexes =
+        collectionInfo.payload_schema || {};
+
+    for (const field of [
+        "ownerId",
+        "documentId",
+        "workspaceId"
+    ]) {
+        if (!existingIndexes[field]) {
+            await client.createPayloadIndex(
                 COLLECTION_NAME,
                 {
-                    vectors: {
-                        size: VECTOR_SIZE,
-                        distance: "Cosine"
-                    }
+                    field_name: field,
+                    field_schema: "keyword",
+                    wait: true
                 }
             );
-
-            console.log(
-                `Qdrant collection created successfully: ${COLLECTION_NAME}`
-            );
-
-        } else {
-
-            console.log(
-                `Qdrant collection ready: ${COLLECTION_NAME}`
-            );
         }
-
-
-        // ---------------------------------
-        // Create payload index for ownerId
-        // ---------------------------------
-
-        await client.createPayloadIndex(
-            COLLECTION_NAME,
-            {
-                field_name: "ownerId",
-                field_schema: "keyword",
-                wait: true
-            }
-        );
-
-
-        // ---------------------------------
-        // Create payload index for documentId
-        // ---------------------------------
-
-        await client.createPayloadIndex(
-            COLLECTION_NAME,
-            {
-                field_name: "documentId",
-                field_schema: "keyword",
-                wait: true
-            }
-        );
-
-
-    } catch (error) {
-
-        console.error(
-            "Qdrant collection initialization failed:",
-            error.message
-        );
-
-        throw error;
     }
+
+    console.log("Qdrant collection ready:", COLLECTION_NAME);
+}
+
+async function ensureCollection() {
+    if (!initializationPromise) {
+        initializationPromise = initializeCollection()
+            .catch(error => {
+                initializationPromise = null;
+                throw error;
+            });
+    }
+
+    return initializationPromise;
 }
 
 async function upsertChunks(points) {
-
-    if (!points || points.length === 0) {
+    if (!Array.isArray(points) || points.length === 0) {
         return;
     }
 
@@ -109,22 +92,19 @@ async function upsertChunks(points) {
     );
 }
 
-
 async function deleteDocumentVectors(documentId) {
-
     await ensureCollection();
 
     await client.delete(
         COLLECTION_NAME,
         {
             wait: true,
-
             filter: {
                 must: [
                     {
                         key: "documentId",
                         match: {
-                            value: documentId.toString()
+                            value: String(documentId)
                         }
                     }
                 ]
@@ -133,28 +113,60 @@ async function deleteDocumentVectors(documentId) {
     );
 }
 
+/*
+ * Personal search:
+ *   ownerId is required.
+ *   workspaceId is null.
+ *
+ * Workspace search:
+ *   workspaceId is required.
+ *   ownerId is ignored for vector filtering.
+ *
+ * The calling controller must verify workspace
+ * membership before requesting workspace search.
+ */
 async function searchSimilarChunks(
     vector,
     limit = 5,
     documentIds = null,
-    ownerId = null
+    ownerId = null,
+    workspaceId = null
 ) {
     await ensureCollection();
 
-    if (!ownerId) {
-        throw new Error("Owner ID is required for vector search.");
-    }
+    const must = [];
 
-    const must = [
-        {
+    if (workspaceId) {
+        must.push({
+            key: "workspaceId",
+            match: {
+                value: String(workspaceId)
+            }
+        });
+    } else {
+        if (!ownerId) {
+            throw new Error(
+                "Owner ID is required for personal vector search."
+            );
+        }
+
+        must.push({
             key: "ownerId",
             match: {
                 value: String(ownerId)
             }
-        }
-    ];
+        });
 
-    if (documentIds) {
+        // Exclude workspace vectors, including documents
+        // uploaded by this same user.
+        must.push({
+            is_empty: {
+                key: "workspaceId"
+            }
+        });
+    }
+
+    if (documentIds !== null && documentIds !== undefined) {
         const ids = (
             Array.isArray(documentIds)
                 ? documentIds
@@ -173,11 +185,16 @@ async function searchSimilarChunks(
         });
     }
 
+    const safeLimit = Math.min(
+        Math.max(Number(limit) || 5, 1),
+        20
+    );
+
     const response = await client.query(
         COLLECTION_NAME,
         {
             query: vector,
-            limit: Number(limit),
+            limit: safeLimit,
             with_payload: true,
             filter: { must }
         }

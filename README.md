@@ -4,6 +4,18 @@ An AI-powered backend developed during the **ZYROO Backend Development Internshi
 
 Cortex AI allows users to upload documents, perform semantic searches, chat with their documents using Retrieval-Augmented Generation (RAG), manage subscriptions, and collaborate through team workspaces.
 
+## Live Deployment
+
+The Cortex AI Backend is deployed on Render.
+
+- **Live API:** https://cortex-ai-backend-jqgo.onrender.com
+- **Health Check:** https://cortex-ai-backend-jqgo.onrender.com/api/health
+- **Swagger API Documentation:** https://cortex-ai-backend-jqgo.onrender.com/api-docs
+
+The backend uses MongoDB Atlas for database storage, Qdrant for vector search, Google Gemini for AI functionality, and Stripe Sandbox for subscription testing.
+
+**Note:** This is a backend API. The root URL (`/`) does not provide a frontend interface. Use the health endpoint or Swagger documentation to explore the API.
+
 ## Technologies Used
 
 - **Backend:** Node.js, Express.js
